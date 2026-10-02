@@ -797,7 +797,9 @@ Revision=1";
 
                 }
 
-                int max = first_element.Max() + 1;
+                // Default to index 0 when scripts.ini has no numbered CmdLine entries yet; List.Max()
+                // throws on an empty sequence, which crashed the tool for an existing-but-empty scripts.ini.
+                int max = first_element.Count > 0 ? first_element.Max() + 1 : 0;
                 new_list.Add(hidden_ini = max.ToString() + "CmdLine=" + ScriptName + Environment.NewLine + max.ToString() + "Parameters=");
 
                 using (System.IO.StreamWriter file2 = new System.IO.StreamWriter(hidden_path))
