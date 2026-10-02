@@ -41,6 +41,7 @@ Example:
 ```
 
 ### Adding a Local Admin 
+The account is **added** to the local Administrators group of the computers controlled by the GPO. Existing members are preserved (this uses the additive Restricted Groups `Memberof` directive rather than the enforcing `Members` directive, so it will not wipe or replace current admins).
 ```
 Options required to add a new local admin:
 --UserAccount
