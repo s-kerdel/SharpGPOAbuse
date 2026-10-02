@@ -837,6 +837,15 @@ Revision=1";
             string ImmediateTaskXML;
             string start = @"<?xml version=""1.0"" encoding=""utf-8""?><ScheduledTasks clsid=""{CC63F200-7309-4ba0-B154-A71CD118DBCC}"">";
             string end = @"</ScheduledTasks>";
+
+            // Escape user-supplied values so that special characters (& < > " ') do not corrupt the XML (see upstream PR #9).
+            author = System.Security.SecurityElement.Escape(author);
+            task_name = System.Security.SecurityElement.Escape(task_name);
+            command = System.Security.SecurityElement.Escape(command);
+            arguments = System.Security.SecurityElement.Escape(arguments);
+            targetUsername = System.Security.SecurityElement.Escape(targetUsername);
+            targetUserSID = System.Security.SecurityElement.Escape(targetUserSID);
+            targetDnsName = System.Security.SecurityElement.Escape(targetDnsName);
             if (objectType.Equals("Computer"))
             {
                 if (filterEnabled)
@@ -897,9 +906,12 @@ Revision=1";
                     {
                         while ((line = file.ReadLine()) != null)
                         {
-                            if (line.Replace(" ", "").Contains("</ScheduledTasks>"))
+                            // Insert the new task immediately before the closing tag instead of before the whole
+                            // line. The XML is written on a single line, so prepending before the line would place
+                            // the task ahead of the "<?xml ?>" declaration and corrupt the file (upstream PR #18 / issue #15).
+                            if (line.Contains("</ScheduledTasks>"))
                             {
-                                line = ImmediateTaskXML + line;
+                                line = line.Replace("</ScheduledTasks>", ImmediateTaskXML + "</ScheduledTasks>");
                             }
                             new_list.Add(line);
                         }
