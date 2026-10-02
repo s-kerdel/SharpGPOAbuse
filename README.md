@@ -3,8 +3,19 @@ SharpGPOAbuse is a .NET application written in C# that can be used to take advan
 
 More details can be found at the following blog post: [https://labs.mwrinfosecurity.com/tools/sharpgpoabuse](https://labs.mwrinfosecurity.com/tools/sharpgpoabuse)
 
-## Compile Instructions ## 
-Make sure the necessary NuGet packages are installed properly and simply build the project in Visual Studio.
+## Compile Instructions ##
+The project is SDK-style and targets **.NET Framework 3.5**. The `Microsoft.NETFramework.ReferenceAssemblies` NuGet package supplies the framework reference assemblies, so it **compiles** on Windows, Linux and macOS with the .NET SDK. `Costura.Fody` embeds `CommandLine.dll` into a single executable.
+
+> The output is always a **Windows executable** — the tool uses Windows-only Active Directory APIs and must be run on a domain-joined Windows host. Building elsewhere is a convenience, not a Linux port.
+
+### .NET SDK (Windows / Linux / macOS)
+```bash
+dotnet build SharpGPOAbuse.sln -c Release
+```
+Output: `SharpGPOAbuse/bin/Release/net35/SharpGPOAbuse.exe`
+
+### Windows (Visual Studio)
+Open the solution in Visual Studio 2017 or later and build. NuGet packages restore automatically.
 
 ## Usage ##
 ```
